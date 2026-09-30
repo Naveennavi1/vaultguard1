@@ -1,0 +1,10 @@
+# Ignore sensitive local vault data files (NEVER PUSH THESE TO GITHUB)
+master.dat
+vault.enc
+
+# Python cache & virtual environment
+__pycache__/
+*.pyc
+.env
+venv/
+.venv/
