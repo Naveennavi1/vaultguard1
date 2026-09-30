@@ -15,11 +15,7 @@ from vaultguard_core import (
     get_account_status,
     generate_password,
     evaluate_password_strength,
-    get_vault_stats,
-    hash_password,
-    create_master_password,
-    load_users_db,
-    save_users_db
+    get_vault_stats
 )
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
