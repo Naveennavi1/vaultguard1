@@ -4,3 +4,4 @@ pyperclip>=1.8.2
 flask>=3.0.0
 flask-cors>=4.0.0
 pillow>=10.0.0
+gunicorn>=21.0.0
