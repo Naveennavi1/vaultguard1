@@ -1,6 +1,8 @@
-# Ignore sensitive local vault data files (NEVER PUSH THESE TO GITHUB)
+# Ignore sensitive local vault & user data files (NEVER PUSH THESE TO GITHUB)
 master.dat
 vault.enc
+users.json
+vaults/
 
 # Python cache & virtual environment
 __pycache__/

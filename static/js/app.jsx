@@ -1,16 +1,19 @@
-const { useState, useEffect, useMemo, useCallback } = React;
+const { useState, useEffect, useMemo } = React;
 
 function App() {
   const [unlocked, setUnlocked] = useState(false);
-  const [masterSet, setMasterSet] = useState(false);
+  const [currentUser, setCurrentUser] = useState(null);
+  const [authMode, setAuthMode] = useState("login"); // "login" or "register"
   const [activeTab, setActiveTab] = useState("vault");
+
   const [accounts, setAccounts] = useState([]);
   const [stats, setStats] = useState({ total_accounts: 0, overdue_count: 0, weak_passwords: 0, security_score: 100 });
   const [searchQuery, setSearchQuery] = useState("");
   const [toastMsg, setToastMsg] = useState("");
   const [visiblePasswords, setVisiblePasswords] = useState({});
 
-  // Auth inputs
+  // Form states
+  const [email, setEmail] = useState("");
   const [masterPassword, setMasterPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [authError, setAuthError] = useState("");
@@ -20,6 +23,7 @@ function App() {
   const [modalService, setModalService] = useState("");
   const [modalUsername, setModalUsername] = useState("");
   const [modalPassword, setModalPassword] = useState("");
+  const [showModalPassword, setShowModalPassword] = useState(false);
   const [isEditMode, setIsEditMode] = useState(false);
 
   // Generator State
@@ -31,13 +35,12 @@ function App() {
   const [generatedPass, setGeneratedPass] = useState("");
   const [genStrength, setGenStrength] = useState({ score: 0, label: "Weak", color: "#EF4444" });
 
-  // Initial status fetch
   const checkStatus = async () => {
     try {
       const res = await fetch("/api/status");
       const data = await res.json();
-      setMasterSet(data.master_set);
       setUnlocked(data.unlocked);
+      setCurrentUser(data.user);
       if (data.unlocked) fetchAccounts();
     } catch (err) {
       console.error(err);
@@ -71,7 +74,6 @@ function App() {
     showToast(msg);
   };
 
-  // Toggle Password Visibility inside card
   const togglePassVisibility = (service) => {
     setVisiblePasswords(prev => ({
       ...prev,
@@ -79,32 +81,37 @@ function App() {
     }));
   };
 
-  // Auth Handling
+  // Auth Submit (Login / Register)
   const handleAuth = async (e) => {
     e.preventDefault();
     setAuthError("");
 
-    if (!masterSet) {
+    if (!email || !masterPassword) {
+      setAuthError("Please fill in email and password.");
+      return;
+    }
+
+    if (authMode === "register") {
       if (masterPassword !== confirmPassword) {
-        setAuthError("Passwords do not match!");
+        setAuthError("Master passwords do not match!");
         return;
       }
       if (masterPassword.length < 6) {
-        setAuthError("Password must be at least 6 characters.");
+        setAuthError("Master password must be at least 6 characters.");
         return;
       }
 
-      const res = await fetch("/api/setup", {
+      const res = await fetch("/api/register", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ password: masterPassword })
+        body: JSON.stringify({ email, password: masterPassword })
       });
       const data = await res.json();
       if (data.success) {
         setUnlocked(true);
-        setMasterSet(true);
+        setCurrentUser(data.user);
         fetchAccounts();
-        showToast("Vault created successfully!");
+        showToast("Account created successfully!");
       } else {
         setAuthError(data.error);
       }
@@ -112,28 +119,30 @@ function App() {
       const res = await fetch("/api/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ password: masterPassword })
+        body: JSON.stringify({ email, password: masterPassword })
       });
       const data = await res.json();
       if (data.success) {
         setUnlocked(true);
+        setCurrentUser(data.user);
         fetchAccounts();
-        showToast("Vault unlocked!");
+        showToast("Welcome back!");
       } else {
         setAuthError(data.error);
       }
     }
   };
 
-  const lockVault = async () => {
-    await fetch("/api/lock", { method: "POST" });
+  const handleLogout = async () => {
+    await fetch("/api/logout", { method: "POST" });
     setUnlocked(false);
+    setCurrentUser(null);
+    setEmail("");
     setMasterPassword("");
     setConfirmPassword("");
-    showToast("Vault Locked");
+    showToast("Signed Out");
   };
 
-  // Save Account
   const handleSaveAccount = async (e) => {
     e.preventDefault();
     if (!modalService || !modalUsername || !modalPassword) {
@@ -176,6 +185,7 @@ function App() {
     setModalService("");
     setModalUsername("");
     setModalPassword("");
+    setShowModalPassword(false);
     setIsEditMode(false);
     setIsModalOpen(true);
   };
@@ -184,6 +194,7 @@ function App() {
     setModalService(acc.service);
     setModalUsername(acc.username);
     setModalPassword(acc.password);
+    setShowModalPassword(false);
     setIsEditMode(true);
     setIsModalOpen(true);
   };
@@ -210,7 +221,6 @@ function App() {
     if (activeTab === "generator") handleGeneratePassword();
   }, [activeTab, genLength, genUpper, genLower, genDigits, genSymbols]);
 
-  // Filtered Accounts
   const filteredAccounts = useMemo(() => {
     return accounts.filter(acc =>
       acc.service.toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -218,34 +228,65 @@ function App() {
     );
   }, [accounts, searchQuery]);
 
-  // If locked, render Auth view
+  // Auth View (Login / Register)
   if (!unlocked) {
     return (
       <div className="auth-wrapper">
         <div className="auth-card">
           <div className="brand-icon" style={{ margin: "0 auto 16px auto", width: "56px", height: "56px", fontSize: "28px" }}>🔐</div>
-          <h1 className="auth-title" style={{ marginBottom: "24px" }}>VaultGuard</h1>
+          <h1 className="auth-title" style={{ marginBottom: "16px" }}>VaultGuard</h1>
+
+          {/* Auth Tabs */}
+          <div style={{ display: "flex", background: "var(--bg-input)", borderRadius: "8px", padding: "4px", marginBottom: "20px" }}>
+            <button
+              type="button"
+              className="btn-sm"
+              style={{ flex: 1, background: authMode === "login" ? "var(--accent-primary)" : "transparent", color: authMode === "login" ? "white" : "var(--text-muted)" }}
+              onClick={() => { setAuthMode("login"); setAuthError(""); }}
+            >
+              Sign In
+            </button>
+            <button
+              type="button"
+              className="btn-sm"
+              style={{ flex: 1, background: authMode === "register" ? "var(--accent-primary)" : "transparent", color: authMode === "register" ? "white" : "var(--text-muted)" }}
+              onClick={() => { setAuthMode("register"); setAuthError(""); }}
+            >
+              Create Account
+            </button>
+          </div>
 
           <form onSubmit={handleAuth}>
             <div className="form-group">
-              <label className="form-label">{masterSet ? "Master Password" : "Create Master Password"}</label>
+              <label className="form-label">Email Address</label>
+              <input
+                type="email"
+                className="form-input"
+                placeholder="name@example.com"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                autoFocus
+              />
+            </div>
+
+            <div className="form-group">
+              <label className="form-label">Master Password</label>
               <input
                 type="password"
                 className="form-input"
                 placeholder="Enter master password"
                 value={masterPassword}
                 onChange={(e) => setMasterPassword(e.target.value)}
-                autoFocus
               />
             </div>
 
-            {!masterSet && (
+            {authMode === "register" && (
               <div className="form-group">
                 <label className="form-label">Confirm Master Password</label>
                 <input
                   type="password"
                   className="form-input"
-                  placeholder="Confirm password"
+                  placeholder="Confirm master password"
                   value={confirmPassword}
                   onChange={(e) => setConfirmPassword(e.target.value)}
                 />
@@ -255,7 +296,7 @@ function App() {
             {authError && <p style={{ color: "#EF4444", fontSize: "12px", marginBottom: "12px" }}>{authError}</p>}
 
             <button type="submit" className="btn-primary">
-              {masterSet ? "UNLOCK VAULT" : "CREATE VAULT"}
+              {authMode === "login" ? "SIGN IN TO VAULT" : "CREATE ACCOUNT"}
             </button>
           </form>
         </div>
@@ -278,6 +319,14 @@ function App() {
             </div>
           </div>
 
+          {/* User Profile Info */}
+          {currentUser && (
+            <div style={{ background: "rgba(255,255,255,0.05)", padding: "8px 12px", borderRadius: "8px", marginBottom: "16px", fontSize: "12px", display: "flex", alignItems: "center", gap: "8px" }}>
+              <span>👤</span>
+              <span style={{ fontWeight: "700", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{currentUser.email}</span>
+            </div>
+          )}
+
           <nav className="nav-menu">
             <button className={`nav-item ${activeTab === "vault" ? "active" : ""}`} onClick={() => setActiveTab("vault")}>
               <span>📦</span> Accounts Vault
@@ -293,7 +342,7 @@ function App() {
 
         <div>
           <div className="sidebar-card">
-            <div style={{ display: "flex", justifyContent: "space-between", fontSize: "12px", fontWeight: "700" }}>
+            <div style={{ display: "flex", justify: "space-between", fontSize: "12px", fontWeight: "700" }}>
               <span style={{ color: "var(--text-muted)" }}>Vault Health</span>
               <span style={{ color: "var(--accent-success)" }}>{stats.security_score}%</span>
             </div>
@@ -303,8 +352,8 @@ function App() {
             <p style={{ fontSize: "11px", color: "var(--text-muted)" }}>{stats.total_accounts} Total Stored Items</p>
           </div>
 
-          <button className="lock-btn" onClick={lockVault}>
-            🔒 Lock Vault
+          <button className="lock-btn" onClick={handleLogout}>
+            🔒 Sign Out
           </button>
         </div>
       </aside>
@@ -332,7 +381,7 @@ function App() {
             <div className="account-list">
               {filteredAccounts.length === 0 ? (
                 <div className="sidebar-card" style={{ textAlign: "center", padding: "40px" }}>
-                  <p style={{ color: "var(--text-muted)", fontWeight: "600" }}>📭 No accounts found in your vault.</p>
+                  <p style={{ color: "var(--text-muted)", fontWeight: "600" }}>📭 No accounts found in your personal vault.</p>
                 </div>
               ) : (
                 filteredAccounts.map((acc) => {
@@ -350,7 +399,7 @@ function App() {
                           </div>
                           <p className="account-meta">👤 {acc.username}</p>
 
-                          {/* Show/Hide Password Toggle Line inside Card */}
+                          {/* Show/Hide Password Toggle Line */}
                           <div className="password-row">
                             <span className={`password-text ${isPassRevealed ? "revealed" : ""}`}>
                               🔑 {isPassRevealed ? acc.password : "••••••••••••"}
@@ -366,7 +415,7 @@ function App() {
                       </div>
 
                       <div className="action-group">
-                        <button className="btn-sm btn-copy-pass" onClick={() => copyToClipboard(acc.password, "Password copied to clipboard!")}>
+                        <button className="btn-sm btn-copy-pass" onClick={() => copyToClipboard(acc.password, "Password copied!")}>
                           📋 Password
                         </button>
                         <button className="btn-sm btn-copy-user" onClick={() => copyToClipboard(acc.username, "Username copied!")}>
@@ -389,9 +438,9 @@ function App() {
             <h2 style={{ fontSize: "22px", fontWeight: "800", marginBottom: "4px" }}>⚡ Password Generator</h2>
             <p style={{ fontSize: "13px", color: "var(--text-muted)", marginBottom: "20px" }}>Generate cryptographically strong passwords.</p>
 
-            <div className="form-input" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px", padding: "16px" }}>
+            <div className="form-input" style={{ display: "flex", justifyContent: "space-between", fontStyle: "normal", alignItems: "center", marginBottom: "16px", padding: "16px" }}>
               <span style={{ fontFamily: "monospace", fontSize: "18px", fontWeight: "700", color: "var(--accent-primary)" }}>{generatedPass}</span>
-              <button className="btn-sm btn-copy-pass" onClick={() => copyToClipboard(generatedPass, "Generated password copied!")}>📋 Copy</button>
+              <button className="btn-sm btn-copy-pass" onClick={() => copyToClipboard(generatedPass, "Copied password!")}>📋 Copy</button>
             </div>
 
             <div style={{ marginBottom: "20px" }}>
@@ -460,7 +509,24 @@ function App() {
               </div>
               <div className="form-group">
                 <label className="form-label">Password</label>
-                <input type="password" className="form-input" placeholder="Password" value={modalPassword} onChange={(e) => setModalPassword(e.target.value)} />
+                <div style={{ display: "flex", gap: "8px" }}>
+                  <input
+                    type={showModalPassword ? "text" : "password"}
+                    className="form-input"
+                    placeholder="Password"
+                    value={modalPassword}
+                    onChange={(e) => setModalPassword(e.target.value)}
+                    style={{ flex: 1 }}
+                  />
+                  <button
+                    type="button"
+                    className="btn-sm btn-copy-user"
+                    style={{ padding: "0 12px", whiteSpace: "nowrap" }}
+                    onClick={() => setShowModalPassword(!showModalPassword)}
+                  >
+                    {showModalPassword ? "🙈 Hide" : "👁️ Show"}
+                  </button>
+                </div>
               </div>
               <div style={{ display: "flex", gap: "10px", marginTop: "24px" }}>
                 <button type="button" className="btn-sm btn-copy-user" style={{ flex: 1, padding: "12px" }} onClick={() => setIsModalOpen(false)}>Cancel</button>

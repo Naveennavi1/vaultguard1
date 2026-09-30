@@ -654,10 +654,22 @@ class VaultGuardApp(ctk.CTk):
         pass_frame = ctk.CTkFrame(card, fg_color="transparent")
         pass_frame.pack(padx=20, pady=(2, 12), fill="x")
 
-        password_entry = ctk.CTkEntry(pass_frame, width=280, height=40, show="•", font=ctk.CTkFont(size=13))
+        password_entry = ctk.CTkEntry(pass_frame, width=220, height=40, show="•", font=ctk.CTkFont(size=13))
         password_entry.pack(side="left")
         if is_edit and orig_acc:
             password_entry.insert(0, orig_acc.get("password", ""))
+
+        is_modal_pass_shown = False
+        def toggle_modal_pass():
+            nonlocal is_modal_pass_shown
+            is_modal_pass_shown = not is_modal_pass_shown
+            password_entry.configure(show="" if is_modal_pass_shown else "•")
+            eye_btn.configure(text="🙈" if is_modal_pass_shown else "👁️")
+
+        eye_btn = ctk.CTkButton(
+            pass_frame, text="👁️", width=50, height=40, font=ctk.CTkFont(size=14), fg_color=("gray85", "#334155"), command=toggle_modal_pass
+        )
+        eye_btn.pack(side="left", padx=5)
 
         def gen_quick_pass():
             p = generate_password(length=16)

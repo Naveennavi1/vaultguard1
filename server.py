@@ -1,35 +1,35 @@
 """
-VaultGuard - Flask REST API Backend for React Frontend
+VaultGuard - Multi-User Flask REST API Backend Server
 """
 
 import os
 import sys
 import webbrowser
-from flask import Flask, request, jsonify, render_template, send_from_directory
+from flask import Flask, request, jsonify, render_template
 from flask_cors import CORS
 
-# Import core engine
 from vaultguard_core import (
-    is_master_password_set,
-    create_master_password,
-    verify_master_password,
-    save_vault,
+    register_user,
+    login_user,
+    save_user_vault,
     get_account_status,
     generate_password,
     evaluate_password_strength,
     get_vault_stats,
-    ROTATION_DAYS
+    hash_password,
+    create_master_password,
+    load_users_db,
+    save_users_db
 )
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
+app.secret_key = os.urandom(24)
 CORS(app)
 
-# In-memory active session state
+# Session state dictionary (user_info per active session)
 session_data = {
     "unlocked": False,
-    "vault": {},
-    "master_password": None,
-    "salt": None
+    "user_info": None  # Stores: user_id, email, password, salt_bytes, vault
 }
 
 
@@ -41,72 +41,89 @@ def index():
 
 @app.route("/api/status", methods=["GET"])
 def get_status():
-    """Returns whether master password is configured and vault lock state."""
+    """Returns lock status and logged-in user profile info."""
+    if session_data["unlocked"] and session_data["user_info"]:
+        return jsonify({
+            "unlocked": True,
+            "user": {
+                "email": session_data["user_info"]["email"],
+                "user_id": session_data["user_info"]["user_id"]
+            }
+        })
     return jsonify({
-        "master_set": is_master_password_set(),
-        "unlocked": session_data["unlocked"]
+        "unlocked": False,
+        "user": None
     })
 
 
-@app.route("/api/setup", methods=["POST"])
-def setup_master():
-    """Create new master password."""
+@app.route("/api/register", methods=["POST"])
+def register_endpoint():
+    """Register a new user account."""
     data = request.json or {}
+    email = data.get("email", "").strip()
     password = data.get("password", "").strip()
 
-    if not password or len(password) < 6:
-        return jsonify({"success": False, "error": "Master password must be at least 6 characters."}), 400
+    if not email or not password:
+        return jsonify({"success": False, "error": "Email and password are required."}), 400
 
-    success, msg = create_master_password(password)
-    if success:
-        ok, _, vault, salt = verify_master_password(password)
-        if ok:
-            session_data["unlocked"] = True
-            session_data["vault"] = vault
-            session_data["master_password"] = password
-            session_data["salt"] = salt
-            return jsonify({"success": True, "message": "Master password created and vault unlocked!"})
-    
-    return jsonify({"success": False, "error": msg}), 500
+    ok, msg, user_info = register_user(email, password)
+    if ok and user_info:
+        session_data["unlocked"] = True
+        session_data["user_info"] = user_info
+        return jsonify({
+            "success": True,
+            "message": msg,
+            "user": {
+                "email": user_info["email"],
+                "user_id": user_info["user_id"]
+            }
+        })
+
+    return jsonify({"success": False, "error": msg}), 400
 
 
 @app.route("/api/login", methods=["POST"])
-def login():
-    """Verify master password and unlock vault."""
+def login_endpoint():
+    """Authenticate user with email & master password."""
     data = request.json or {}
+    email = data.get("email", "").strip()
     password = data.get("password", "").strip()
 
-    if not password:
-        return jsonify({"success": False, "error": "Password cannot be empty."}), 400
+    if not email or not password:
+        return jsonify({"success": False, "error": "Email and master password are required."}), 400
 
-    ok, msg, vault, salt = verify_master_password(password)
-    if ok:
+    ok, msg, user_info = login_user(email, password)
+    if ok and user_info:
         session_data["unlocked"] = True
-        session_data["vault"] = vault
-        session_data["master_password"] = password
-        session_data["salt"] = salt
-        return jsonify({"success": True, "message": "Vault unlocked!"})
-    
-    return jsonify({"success": False, "error": "Incorrect master password."}), 401
+        session_data["user_info"] = user_info
+        return jsonify({
+            "success": True,
+            "message": msg,
+            "user": {
+                "email": user_info["email"],
+                "user_id": user_info["user_id"]
+            }
+        })
+
+    return jsonify({"success": False, "error": msg}), 401
 
 
-@app.route("/api/lock", methods=["POST"])
-def lock_vault():
-    """Lock the active vault session."""
+@app.route("/api/logout", methods=["POST"])
+def logout_endpoint():
+    """Lock vault and log out active user."""
     session_data["unlocked"] = False
-    session_data["vault"] = {}
-    session_data["master_password"] = None
-    session_data["salt"] = None
-    return jsonify({"success": True, "message": "Vault locked."})
+    session_data["user_info"] = None
+    return jsonify({"success": True, "message": "Logged out successfully."})
 
 
 @app.route("/api/accounts", methods=["GET"])
 def get_accounts():
-    """Get stored accounts, audit alerts, and stats."""
-    if not session_data["unlocked"]:
-        return jsonify({"success": False, "error": "Vault is locked."}), 403
+    """Get stored accounts & stats for the active user."""
+    if not session_data["unlocked"] or not session_data["user_info"]:
+        return jsonify({"success": False, "error": "Vault is locked. Please log in."}), 403
 
-    vault = session_data["vault"]
+    user = session_data["user_info"]
+    vault = user["vault"]
     stats = get_vault_stats(vault)
 
     account_list = []
@@ -131,8 +148,8 @@ def get_accounts():
 
 @app.route("/api/account", methods=["POST"])
 def save_account_endpoint():
-    """Add or update an account in the vault."""
-    if not session_data["unlocked"]:
+    """Add or update an account for the logged-in user."""
+    if not session_data["unlocked"] or not session_data["user_info"]:
         return jsonify({"success": False, "error": "Vault is locked."}), 403
 
     data = request.json or {}
@@ -144,7 +161,8 @@ def save_account_endpoint():
     if not service or not username or not password:
         return jsonify({"success": False, "error": "Please fill in all fields."}), 400
 
-    vault = session_data["vault"]
+    user = session_data["user_info"]
+    vault = user["vault"]
 
     if not is_edit and service in vault:
         return jsonify({"success": False, "error": "An account for this service already exists!"}), 400
@@ -156,20 +174,22 @@ def save_account_endpoint():
         "last_changed": datetime.now().strftime("%Y-%m-%d")
     }
 
-    save_vault(vault, session_data["master_password"], session_data["salt"])
+    save_user_vault(user["user_id"], vault, user["password"], user["salt_bytes"])
     return jsonify({"success": True, "message": f"Account '{service}' saved successfully!"})
 
 
 @app.route("/api/account/<service>", methods=["DELETE"])
 def delete_account_endpoint(service):
-    """Delete an account from the vault."""
-    if not session_data["unlocked"]:
+    """Delete an account from the user's vault."""
+    if not session_data["unlocked"] or not session_data["user_info"]:
         return jsonify({"success": False, "error": "Vault is locked."}), 403
 
-    vault = session_data["vault"]
+    user = session_data["user_info"]
+    vault = user["vault"]
+
     if service in vault:
         del vault[service]
-        save_vault(vault, session_data["master_password"], session_data["salt"])
+        save_user_vault(user["user_id"], vault, user["password"], user["salt_bytes"])
         return jsonify({"success": True, "message": f"Account '{service}' deleted."})
 
     return jsonify({"success": False, "error": "Account not found."}), 404
@@ -177,7 +197,7 @@ def delete_account_endpoint(service):
 
 @app.route("/api/generate-password", methods=["POST"])
 def generate_password_endpoint():
-    """Generate a cryptographically random password."""
+    """Generate a random password."""
     data = request.json or {}
     length = int(data.get("length", 16))
     upper = bool(data.get("upper", True))
@@ -192,29 +212,6 @@ def generate_password_endpoint():
         "password": pwd,
         "strength": strength
     })
-
-
-@app.route("/api/change-master", methods=["POST"])
-def change_master_password():
-    """Change master password."""
-    if not session_data["unlocked"]:
-        return jsonify({"success": False, "error": "Vault is locked."}), 403
-
-    data = request.json or {}
-    new_pass = data.get("password", "").strip()
-
-    if not new_pass or len(new_pass) < 6:
-        return jsonify({"success": False, "error": "New master password must be at least 6 characters."}), 400
-
-    create_master_password(new_pass)
-    ok, msg, vault, salt = verify_master_password(new_pass)
-    if ok:
-        session_data["vault"] = vault
-        session_data["master_password"] = new_pass
-        session_data["salt"] = salt
-        return jsonify({"success": True, "message": "Master password updated successfully!"})
-
-    return jsonify({"success": False, "error": "Failed to update master password."}), 500
 
 
 def run_server(port=5000, open_browser=True):

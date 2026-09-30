@@ -1,5 +1,5 @@
 """
-VaultGuard Core Encryption & Vault Management Engine
+VaultGuard Core Engine - Multi-User Architecture & Encryption Engine
 """
 
 import os
@@ -12,9 +12,13 @@ from datetime import datetime
 from cryptography.fernet import Fernet
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-MASTER_DAT = os.path.join(BASE_DIR, "master.dat")
-VAULT_ENC = os.path.join(BASE_DIR, "vault.enc")
+USERS_FILE = os.path.join(BASE_DIR, "users.json")
+VAULTS_DIR = os.path.join(BASE_DIR, "vaults")
 ROTATION_DAYS = 120
+
+# Ensure vaults directory exists
+os.makedirs(VAULTS_DIR, exist_ok=True)
+
 
 # ----------------------------------------
 # CRYPTOGRAPHY HELPERS
@@ -42,76 +46,130 @@ def create_encryption_key(password: str, salt: bytes) -> bytes:
     return base64.urlsafe_b64encode(key)
 
 
-def is_master_password_set() -> bool:
-    """Check if master password file exists."""
-    return os.path.exists(MASTER_DAT)
-
-
-def create_master_password(password: str) -> tuple[bool, str]:
-    """Create salt and hashed master password, then initialize empty vault."""
+def load_users_db() -> dict:
+    """Load user registry database."""
+    if not os.path.exists(USERS_FILE):
+        return {}
     try:
-        salt = os.urandom(16)
-        hashed = hash_password(password, salt)
-
-        with open(MASTER_DAT, "wb") as f:
-            f.write(salt)
-            f.write(hashed)
-
-        create_vault(password, salt)
-        return True, "Master password created successfully!"
-    except Exception as e:
-        return False, f"Failed to create master password: {e}"
+        with open(USERS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
 
 
-def verify_master_password(password: str) -> tuple[bool, str, dict | None, bytes | None]:
-    """Verify master password and load vault data."""
-    if not is_master_password_set():
-        return False, "No master password configured.", None, None
+def save_users_db(users: dict):
+    """Save user registry database."""
+    with open(USERS_FILE, "w", encoding="utf-8") as f:
+        json.dump(users, f, indent=2)
 
-    try:
-        with open(MASTER_DAT, "rb") as f:
-            salt = f.read(16)
-            saved_hash = f.read()
 
-        entered_hash = hash_password(password, salt)
-        if entered_hash == saved_hash:
-            vault = load_vault(password, salt)
-            return True, "Login successful!", vault, salt
-        else:
-            return False, "Incorrect master password.", None, None
-    except Exception as e:
-        return False, f"Error verifying master password: {e}", None, None
+def get_user_vault_path(user_id: str) -> str:
+    """Get isolated vault file path for a specific user ID."""
+    return os.path.join(VAULTS_DIR, f"{user_id}.enc")
 
 
 # ----------------------------------------
-# VAULT STORAGE MANAGEMENT
+# MULTI-USER REGISTRATION & LOGIN
 # ----------------------------------------
 
-def create_vault(password: str, salt: bytes):
-    """Initialize encrypted vault file."""
-    key = create_encryption_key(password, salt)
+def register_user(email: str, password: str) -> tuple[bool, str, dict | None]:
+    """Register a new independent user account and initialize their personal vault."""
+    email_clean = email.strip().lower()
+    if not email_clean or "@" not in email_clean:
+        return False, "Invalid email address format.", None
+
+    if len(password) < 6:
+        return False, "Master password must be at least 6 characters.", None
+
+    users = load_users_db()
+
+    if email_clean in users:
+        return False, "An account with this email already exists!", None
+
+    # Generate random user ID & 16-byte salt
+    user_id = hashlib.sha256(email_clean.encode()).hexdigest()[:16]
+    salt_bytes = os.urandom(16)
+    salt_b64 = base64.b64encode(salt_bytes).decode("utf-8")
+
+    hashed_bytes = hash_password(password, salt_bytes)
+    hash_b64 = base64.b64encode(hashed_bytes).decode("utf-8")
+
+    # Store user credentials metadata
+    users[email_clean] = {
+        "user_id": user_id,
+        "email": email_clean,
+        "salt": salt_b64,
+        "hash": hash_b64,
+        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    }
+    save_users_db(users)
+
+    # Initialize empty vault file for new user
+    key = create_encryption_key(password, salt_bytes)
     fernet = Fernet(key)
     encrypted_data = fernet.encrypt(b"{}")
-    with open(VAULT_ENC, "wb") as f:
+    with open(get_user_vault_path(user_id), "wb") as f:
         f.write(encrypted_data)
 
+    user_info = {
+        "user_id": user_id,
+        "email": email_clean,
+        "salt_bytes": salt_bytes,
+        "password": password,
+        "vault": {}
+    }
+    return True, "Account registered successfully!", user_info
 
-def load_vault(password: str, salt: bytes) -> dict:
-    """Decrypt and parse vault data."""
-    key = create_encryption_key(password, salt)
-    fernet = Fernet(key)
 
-    if not os.path.exists(VAULT_ENC):
+def login_user(email: str, password: str) -> tuple[bool, str, dict | None]:
+    """Authenticate user against their email and unlock their personal vault."""
+    email_clean = email.strip().lower()
+    users = load_users_db()
+
+    if email_clean not in users:
+        return False, "Account not found. Please check your email or create an account.", None
+
+    user_record = users[email_clean]
+    user_id = user_record["user_id"]
+    salt_bytes = base64.b64decode(user_record["salt"])
+    saved_hash_bytes = base64.b64decode(user_record["hash"])
+
+    entered_hash_bytes = hash_password(password, salt_bytes)
+
+    if entered_hash_bytes == saved_hash_bytes:
+        vault = load_user_vault(user_id, password, salt_bytes)
+        user_info = {
+            "user_id": user_id,
+            "email": email_clean,
+            "salt_bytes": salt_bytes,
+            "password": password,
+            "vault": vault
+        }
+        return True, "Login successful!", user_info
+    else:
+        return False, "Incorrect master password for this account.", None
+
+
+# ----------------------------------------
+# VAULT STORAGE PER USER
+# ----------------------------------------
+
+def load_user_vault(user_id: str, password: str, salt_bytes: bytes) -> dict:
+    """Decrypt and parse a specific user's vault file."""
+    vault_path = get_user_vault_path(user_id)
+    if not os.path.exists(vault_path):
         return {}
 
     try:
-        with open(VAULT_ENC, "rb") as f:
+        key = create_encryption_key(password, salt_bytes)
+        fernet = Fernet(key)
+
+        with open(vault_path, "rb") as f:
             encrypted_data = f.read()
 
         decrypted_data = fernet.decrypt(encrypted_data)
         vault_data = json.loads(decrypted_data.decode("utf-8"))
 
-        # Ensure last_changed timestamp exists for all accounts
         today_str = datetime.now().strftime("%Y-%m-%d")
         for service, account in vault_data.items():
             if "last_changed" not in account or not account["last_changed"]:
@@ -119,28 +177,30 @@ def load_vault(password: str, salt: bytes) -> dict:
 
         return vault_data
     except Exception as e:
-        print(f"Error loading vault: {e}")
+        print(f"Error loading user vault ({user_id}): {e}")
         return {}
 
 
-def save_vault(vault: dict, password: str, salt: bytes) -> bool:
-    """Encrypt and write vault dictionary to disk."""
+def save_user_vault(user_id: str, vault: dict, password: str, salt_bytes: bytes) -> bool:
+    """Encrypt and write a specific user's vault file."""
     try:
-        key = create_encryption_key(password, salt)
+        vault_path = get_user_vault_path(user_id)
+        key = create_encryption_key(password, salt_bytes)
         fernet = Fernet(key)
+
         vault_json = json.dumps(vault, indent=2)
         encrypted_data = fernet.encrypt(vault_json.encode("utf-8"))
 
-        with open(VAULT_ENC, "wb") as f:
+        with open(vault_path, "wb") as f:
             f.write(encrypted_data)
         return True
     except Exception as e:
-        print(f"Error saving vault: {e}")
+        print(f"Error saving user vault ({user_id}): {e}")
         return False
 
 
 # ----------------------------------------
-# ACCOUNT HELPERS
+# ACCOUNT STATUS & PASSWORD HELPERS
 # ----------------------------------------
 
 def get_account_status(last_changed_str: str) -> dict:
@@ -155,115 +215,70 @@ def get_account_status(last_changed_str: str) -> dict:
     days_remaining = ROTATION_DAYS - days_passed
 
     if days_remaining > 30:
-        badge_text = f"{days_remaining}d left"
-        level = "good"
-        color = "#10B981"  # Emerald green
+        return {"days_passed": days_passed, "badge_text": f"{days_remaining}d left", "level": "good", "color": "#10B981"}
     elif days_remaining > 0:
-        badge_text = f"{days_remaining}d remaining"
-        level = "warning"
-        color = "#F59E0B"  # Amber/Yellow
+        return {"days_passed": days_passed, "badge_text": f"{days_remaining}d remaining", "level": "warning", "color": "#F59E0B"}
     elif days_remaining == 0:
-        badge_text = "Due Today!"
-        level = "due"
-        color = "#EF4444"  # Red
+        return {"days_passed": days_passed, "badge_text": "Due Today!", "level": "due", "color": "#EF4444"}
     else:
-        badge_text = f"{abs(days_remaining)}d overdue"
-        level = "overdue"
-        color = "#DC2626"  # Dark Red
-
-    return {
-        "days_passed": days_passed,
-        "days_remaining": days_remaining,
-        "badge_text": badge_text,
-        "level": level,
-        "color": color
-    }
+        return {"days_passed": days_passed, "badge_text": f"{abs(days_remaining)}d overdue", "level": "overdue", "color": "#DC2626"}
 
 
 def generate_password(length: int = 16, upper: bool = True, lower: bool = True, digits: bool = True, symbols: bool = True) -> str:
     """Generate cryptographically secure random password."""
     charset = ""
-    if upper:
-        charset += string.ascii_uppercase
-    if lower:
-        charset += string.ascii_lowercase
-    if digits:
-        charset += string.digits
-    if symbols:
-        charset += "!@#$%^&*()_+-=[]{}|;:,.<>?"
-
-    if not charset:
-        charset = string.ascii_letters + string.digits
-
+    if upper: charset += string.ascii_uppercase
+    if lower: charset += string.ascii_lowercase
+    if digits: charset += string.digits
+    if symbols: charset += "!@#$%^&*()_+-=[]{}|;:,.<>?"
+    if not charset: charset = string.ascii_letters + string.digits
     return "".join(secrets.choice(charset) for _ in range(length))
 
 
 def evaluate_password_strength(password: str) -> dict:
-    """Evaluate password strength and return score, label, and hex color."""
+    """Evaluate password strength score."""
     if not password:
         return {"score": 0, "label": "Empty", "color": "#9CA3AF"}
 
     score = 0
     length = len(password)
-
-    if length >= 8:
-        score += 20
-    if length >= 12:
-        score += 20
-    if length >= 16:
-        score += 15
+    if length >= 8: score += 20
+    if length >= 12: score += 20
+    if length >= 16: score += 15
 
     has_upper = any(c.isupper() for c in password)
     has_lower = any(c.islower() for c in password)
     has_digit = any(c.isdigit() for c in password)
     has_symbol = any(c in "!@#$%^&*()_+-=[]{}|;:,.<>?" for c in password)
 
-    types_count = sum([has_upper, has_lower, has_digit, has_symbol])
-    score += types_count * 11.25
+    score += sum([has_upper, has_lower, has_digit, has_symbol]) * 11.25
     score = min(100, int(score))
 
-    if score < 40:
-        label = "Weak"
-        color = "#EF4444"  # Red
-    elif score < 70:
-        label = "Medium"
-        color = "#F59E0B"  # Amber
-    elif score < 90:
-        label = "Strong"
-        color = "#10B981"  # Emerald
-    else:
-        label = "Very Strong"
-        color = "#3B82F6"  # Blue
-
-    return {"score": score, "label": label, "color": color}
+    if score < 40: return {"score": score, "label": "Weak", "color": "#EF4444"}
+    elif score < 70: return {"score": score, "label": "Medium", "color": "#F59E0B"}
+    elif score < 90: return {"score": score, "label": "Strong", "color": "#10B981"}
+    else: return {"score": score, "label": "Very Strong", "color": "#3B82F6"}
 
 
 def get_vault_stats(vault: dict) -> dict:
-    """Calculate overall vault statistics for the dashboard."""
+    """Calculate overall vault metrics."""
     total = len(vault)
     overdue = 0
-    warning = 0
-    weak_count = 0
+    weak = 0
     total_score = 0
 
     for service, account in vault.items():
         status = get_account_status(account.get("last_changed", ""))
-        if status["level"] in ["due", "overdue"]:
-            overdue += 1
-        elif status["level"] == "warning":
-            warning += 1
-
-        pass_eval = evaluate_password_strength(account.get("password", ""))
-        total_score += pass_eval["score"]
-        if pass_eval["score"] < 50:
-            weak_count += 1
+        if status["level"] in ["due", "overdue"]: overdue += 1
+        sev = evaluate_password_strength(account.get("password", ""))
+        total_score += sev["score"]
+        if sev["score"] < 50: weak += 1
 
     avg_score = int(total_score / total) if total > 0 else 100
 
     return {
         "total_accounts": total,
         "overdue_count": overdue,
-        "warning_count": warning,
-        "weak_passwords": weak_count,
+        "weak_passwords": weak,
         "security_score": avg_score
     }
